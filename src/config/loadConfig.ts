@@ -25,6 +25,11 @@ export function loadConfig(env: RawConfig) {
     redactedLogging: env.SYNC_REDACTED_LOGGING !== 'false',
     correlationIdHeader: env.SYNC_CORRELATION_ID_HEADER ?? 'X-Correlation-Id',
     allowTotpSync: env.SYNC_ALLOW_TOTP_SYNC === 'true',
+    secretManager: {
+      get(name: string) {
+        return env[name];
+      }
+    },
     cerbyHeaders: {
       origin: env.CERBY_ORIGIN,
       source: env.CERBY_SOURCE,

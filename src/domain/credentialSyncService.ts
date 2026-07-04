@@ -1,7 +1,8 @@
 import { createCerbyClient } from '../clients/cerbyClient.js';
 import { createOktaClient } from '../clients/oktaClient.js';
 import { assertCerbyUserAuthorizedToAccount } from './authorizationValidator.js';
-import { AmbiguousMatchError, AuthorizationError, ConfigValidationError } from '../errors/domainErrors.js';
+import { AuthorizationError, ConfigValidationError } from '../errors/domainErrors.js';
+import { ApiError } from '../errors/apiErrors.js';
 
 type SyncConfig = {
   cerbyWorkspace?: string;
@@ -26,14 +27,29 @@ type SyncConfig = {
   allowUpdateOktaAssignment?: boolean;
   redactedLogging?: boolean;
   correlationIdHeader?: string;
+  secretManager?: { get(name: string): string | undefined };
+};
+
+type AuditLogger = {
+  info(message: string, details?: unknown): void;
+  warn(message: string, details?: unknown): void;
+  error(message: string, details?: unknown): void;
+};
+
+type SyncResult = {
+  status: string;
+  operation: string;
+  correlationId: string;
+  secretsExposed: false;
+  dryRun?: boolean;
 };
 
 function parseArgs(argv: string[]) {
   const args: Record<string, string | boolean> = {};
   for (let index = 0; index < argv.length; index += 1) {
-    const entry = argv[index];
-    if (!entry.startsWith('--')) continue;
-    const key = entry.slice(2);
+    const token = argv[index];
+    if (!token.startsWith('--')) continue;
+    const key = token.slice(2);
     const next = argv[index + 1];
     if (!next || next.startsWith('--')) {
       args[key] = true;
@@ -49,7 +65,7 @@ function correlationId() {
   return globalThis.crypto?.randomUUID?.() ?? `corr-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function safeString(value: unknown) {
+function stringValue(value: unknown) {
   return typeof value === 'string' ? value : '';
 }
 
@@ -57,49 +73,83 @@ function definedStrings(values: Array<string | undefined>) {
   return values.filter((value): value is string => typeof value === 'string' && value.length > 0);
 }
 
-export function createCredentialSyncService(config: SyncConfig, logger: { info: Function; warn: Function; error: Function }) {
-  if (!config.cerbyApiToken || !config.oktaDomain || !config.oktaAuthMode) {
+function readSecret(config: SyncConfig, key: 'cerbyApiToken' | 'oktaApiToken' | 'oktaOauthAccessToken') {
+  return config.secretManager?.get(key) ?? config[key];
+}
+
+function audit(logger: AuditLogger, event: string, details: Record<string, unknown>) {
+  logger.info('audit', { event, ...details });
+}
+
+function isSupportedOktaApp(app: Record<string, unknown>) {
+  const signOnMode = stringValue(app.signOnMode);
+  const status = stringValue(app.status);
+  const allowedModes = new Set(['AUTO_LOGIN', 'BROWSER_PLUGIN', 'SECURE_PASSWORD_STORE', 'OPENID_CONNECT']);
+  return status !== 'INACTIVE' && (!signOnMode || allowedModes.has(signOnMode));
+}
+
+function normalizePassword(response: unknown) {
+  if (typeof response === 'string') return response;
+  if (!response || typeof response !== 'object') return '';
+  const payload = response as Record<string, unknown>;
+  const direct = payload.password ?? payload.value;
+  if (typeof direct === 'string') return direct;
+  const nested = payload.data as Record<string, unknown> | undefined;
+  const nestedPassword = nested?.password;
+  return typeof nestedPassword === 'string' ? nestedPassword : '';
+}
+
+export function createCredentialSyncService(config: SyncConfig, logger: AuditLogger) {
+  const cerbyApiToken = readSecret(config, 'cerbyApiToken');
+  const oktaApiToken = readSecret(config, 'oktaApiToken');
+  const oktaOauthAccessToken = readSecret(config, 'oktaOauthAccessToken');
+
+  if (!cerbyApiToken || !config.oktaDomain || !config.oktaAuthMode) {
     throw new ConfigValidationError('Missing required sync configuration');
   }
 
   const cerbyClient = createCerbyClient({
     cerbyWorkspace: config.cerbyWorkspace ?? '',
     cerbyApiBaseUrl: config.cerbyApiBaseUrl,
-    cerbyApiToken: config.cerbyApiToken,
+    cerbyApiToken,
     cerbyHeaders: config.cerbyHeaders,
     httpTimeoutMs: config.httpTimeoutMs,
     maxRetries: config.maxRetries
   });
+
   const oktaClient = createOktaClient({
     oktaDomain: config.oktaDomain,
     oktaAuthMode: config.oktaAuthMode,
-    oktaApiToken: config.oktaApiToken,
-    oktaOauthAccessToken: config.oktaOauthAccessToken,
+    oktaApiToken,
+    oktaOauthAccessToken,
     httpTimeoutMs: config.httpTimeoutMs,
     maxRetries: config.maxRetries
   });
 
   return {
-    async run(input: { argv: string[]; dryRun: boolean }) {
+    async run(input: { argv: string[]; dryRun: boolean }): Promise<SyncResult> {
       const parsed = parseArgs(input.argv);
       const correlationIdValue = correlationId();
-      const cerbyAccountLookup = safeString(parsed['cerby-account']);
-      const cerbyUserLookup = safeString(parsed['cerby-user']);
-      const oktaUserLookup = safeString(parsed['okta-user']);
-      const oktaAppLookup = safeString(parsed['okta-app']);
+      const cerbyUserLookup = stringValue(parsed['cerby-user']);
+      const cerbyAccountLookup = stringValue(parsed['cerby-account']);
+      const oktaUserLookup = stringValue(parsed['okta-user']);
+      const oktaAppLookup = stringValue(parsed['okta-app']);
 
-      logger.info('credential-sync-started', { correlationId: correlationIdValue, dryRun: input.dryRun, operation: 'sync_credentials' });
-
-      const effectiveCerbyUserLookup = cerbyUserLookup;
-      const effectiveCerbyAccountLookup = cerbyAccountLookup;
-      const effectiveOktaUserLookup = oktaUserLookup;
-      const effectiveOktaAppLookup = oktaAppLookup;
-
-      if (!effectiveCerbyAccountLookup || !effectiveCerbyUserLookup || !effectiveOktaUserLookup || !effectiveOktaAppLookup) {
+      if (!cerbyUserLookup || !cerbyAccountLookup || !oktaUserLookup || !oktaAppLookup) {
         throw new ConfigValidationError('Missing required CLI arguments');
       }
 
+      audit(logger, 'sync-started', {
+        correlationId: correlationIdValue,
+        dryRun: input.dryRun,
+        cerbyUserLookup,
+        cerbyAccountLookup,
+        oktaUserLookup,
+        oktaAppLookup
+      });
+
       if (input.dryRun) {
+        audit(logger, 'sync-dry-run', { correlationId: correlationIdValue });
         return {
           status: 'success',
           operation: 'dry_run_planned_sync',
@@ -109,78 +159,121 @@ export function createCredentialSyncService(config: SyncConfig, logger: { info: 
         };
       }
 
-      const cerbyUsers = await cerbyClient.listUsers(effectiveCerbyUserLookup);
-      const cerbyUser = Array.isArray(cerbyUsers) ? cerbyUsers.find((entry) => entry.id === effectiveCerbyUserLookup || entry.email === effectiveCerbyUserLookup) : cerbyUsers;
-      if (!cerbyUser) {
-        throw new AuthorizationError(`Cerby user not found: ${effectiveCerbyUserLookup}`);
+      const cerbyUsers = await cerbyClient.listUsers(cerbyUserLookup);
+      const cerbyUserList = Array.isArray(cerbyUsers) ? cerbyUsers : [cerbyUsers];
+      const cerbyUserCandidates = cerbyUserList.filter((entry) => entry && typeof entry === 'object' && (entry.id === cerbyUserLookup || entry.email === cerbyUserLookup));
+      if (cerbyUserCandidates.length !== 1) {
+        throw new AuthorizationError(`Cerby user lookup was ambiguous or not found: ${cerbyUserLookup}`);
+      }
+      const cerbyUser = cerbyUserCandidates[0] as Record<string, unknown>;
+
+      const cerbyAccount = await cerbyClient.getAccount(cerbyAccountLookup);
+      if (!cerbyAccount || typeof cerbyAccount !== 'object') {
+        throw new AuthorizationError(`Cerby account not found: ${cerbyAccountLookup}`);
       }
 
-      const cerbyAccount = await cerbyClient.getAccount(effectiveCerbyAccountLookup);
-      if (!cerbyAccount) {
-        throw new AuthorizationError(`Cerby account not found: ${effectiveCerbyAccountLookup}`);
-      }
-
-      const userAccounts = await cerbyClient.listAccountsForUser(cerbyUser.id ?? cerbyUserLookup);
+      const userAccounts = await cerbyClient.listAccountsForUser(stringValue(cerbyUser.id) || cerbyUserLookup);
       const authorizedAccountIds = Array.isArray(userAccounts) ? definedStrings(userAccounts.map((entry: { id?: string }) => entry.id)) : [];
-      assertCerbyUserAuthorizedToAccount(cerbyAccount.id ?? effectiveCerbyAccountLookup, authorizedAccountIds);
+      assertCerbyUserAuthorizedToAccount(stringValue((cerbyAccount as Record<string, unknown>).id) || cerbyAccountLookup, authorizedAccountIds);
 
-      const oktaUsers = await oktaClient.listUsers(effectiveOktaUserLookup);
-      const oktaUser = Array.isArray(oktaUsers) ? oktaUsers.find((entry) => entry.id === effectiveOktaUserLookup || entry.profile?.login === effectiveOktaUserLookup) : oktaUsers;
-      if (!oktaUser) {
-        throw new AuthorizationError(`Okta user not found: ${effectiveOktaUserLookup}`);
+      audit(logger, 'cerby-validated', {
+        correlationId: correlationIdValue,
+        cerbyUserId: stringValue(cerbyUser.id) || cerbyUserLookup,
+        cerbyAccountId: stringValue((cerbyAccount as Record<string, unknown>).id) || cerbyAccountLookup
+      });
+
+      const oktaUsers = await oktaClient.listUsers(oktaUserLookup);
+      const oktaUserList = Array.isArray(oktaUsers) ? oktaUsers : [oktaUsers];
+      const oktaUserCandidates = oktaUserList.filter((entry) => entry && typeof entry === 'object' && (entry.id === oktaUserLookup || entry.profile?.login === oktaUserLookup || entry.login === oktaUserLookup));
+      if (oktaUserCandidates.length !== 1) {
+        throw new AuthorizationError(`Okta user lookup was ambiguous or not found: ${oktaUserLookup}`);
+      }
+      const oktaUser = oktaUserCandidates[0] as Record<string, unknown>;
+
+      const oktaApps = await oktaClient.listApplications(oktaAppLookup);
+      const oktaAppList = Array.isArray(oktaApps) ? oktaApps : [oktaApps];
+      const oktaAppCandidates = oktaAppList.filter((entry) => entry && typeof entry === 'object' && (entry.id === oktaAppLookup || entry.label === oktaAppLookup || entry.name === oktaAppLookup));
+      if (oktaAppCandidates.length !== 1) {
+        throw new AuthorizationError(`Okta application lookup was ambiguous or not found: ${oktaAppLookup}`);
+      }
+      const oktaApp = oktaAppCandidates[0] as Record<string, unknown>;
+
+      if (!isSupportedOktaApp(oktaApp)) {
+        throw new AuthorizationError('Unsupported Okta application sign-on mode');
       }
 
-      const oktaApps = await oktaClient.listApplications(effectiveOktaAppLookup);
-      const oktaApp = Array.isArray(oktaApps) ? oktaApps.find((entry) => entry.id === effectiveOktaAppLookup || entry.label === effectiveOktaAppLookup || entry.label === effectiveOktaAppLookup) : oktaApps;
-      if (!oktaApp) {
-        throw new AuthorizationError(`Okta application not found: ${effectiveOktaAppLookup}`);
-      }
+      const oktaAppId = stringValue(oktaApp.id) || oktaAppLookup;
+      const oktaUserId = stringValue(oktaUser.id) || oktaUserLookup;
 
-      const existingAssignment = await oktaClient.getApplicationUser(oktaApp.id ?? oktaAppLookup, oktaUser.id ?? oktaUserLookup).catch(() => undefined);
+      const assignmentResponse = await oktaClient.getApplicationUserWithMeta(oktaAppId, oktaUserId).catch((error: unknown) => {
+        if (error instanceof ApiError && error.status === 404) {
+          return undefined;
+        }
+        throw error;
+      });
 
-      if (input.dryRun) {
-        return {
-          status: 'success',
-          operation: existingAssignment ? 'planned_okta_assignment_update' : 'planned_okta_assignment_create',
-          correlationId: correlationIdValue,
-          secretsExposed: false,
-          dryRun: true
-        };
-      }
+      const existingAssignment = assignmentResponse?.body;
+      audit(logger, 'okta-assignment-checked', {
+        correlationId: correlationIdValue,
+        oktaRequestId: assignmentResponse?.meta.requestId,
+        oktaAppId,
+        oktaUserId,
+        assignmentExists: Boolean(existingAssignment)
+      });
 
-      const passwordResponse = await cerbyClient.getAccountPassword(cerbyAccount.id ?? cerbyAccountLookup);
-      const password = typeof passwordResponse === 'string' ? passwordResponse : passwordResponse?.password ?? passwordResponse?.value ?? passwordResponse?.data?.password;
+      const passwordResponse = await cerbyClient.getAccountPassword(stringValue((cerbyAccount as Record<string, unknown>).id) || cerbyAccountLookup);
+      const password = normalizePassword(passwordResponse);
       if (!password) {
         throw new AuthorizationError('Cerby password retrieval failed');
       }
 
+      const oktaUserRecord = oktaUser as Record<string, unknown>;
+      const oktaProfile = oktaUserRecord.profile as Record<string, unknown> | undefined;
+
       const payload = {
-        id: oktaUser.id ?? oktaUserLookup,
+        id: oktaUserId,
         scope: 'USER',
         credentials: {
-          userName: oktaUser.profile?.login ?? oktaUser.login ?? oktaUserLookup,
+          userName: stringValue(oktaProfile?.login) || stringValue(oktaUserRecord.login) || oktaUserLookup,
           password: { value: password }
         },
         profile: {}
       };
 
-      let operation = 'okta_assignment_updated';
       if (existingAssignment) {
         if (config.allowUpdateOktaAssignment === false) {
           throw new AuthorizationError('Okta assignment update is disabled');
         }
-        await oktaClient.updateApplicationUser(oktaApp.id ?? oktaAppLookup, oktaUser.id ?? oktaUserLookup, payload);
-      } else {
-        if (config.allowCreateOktaAssignment === false) {
-          throw new AuthorizationError('Okta assignment creation is disabled');
-        }
-        await oktaClient.assignUserToApplication(oktaApp.id ?? oktaAppLookup, payload);
-        operation = 'okta_assignment_created';
+        const updateResult = await oktaClient.updateApplicationUserWithMeta(oktaAppId, oktaUserId, payload);
+        audit(logger, 'okta-assignment-updated', {
+          correlationId: correlationIdValue,
+          oktaRequestId: updateResult.meta.requestId,
+          oktaAppId,
+          oktaUserId
+        });
+        return {
+          status: 'success',
+          operation: 'okta_assignment_updated',
+          correlationId: correlationIdValue,
+          secretsExposed: false
+        };
       }
+
+      if (config.allowCreateOktaAssignment === false) {
+        throw new AuthorizationError('Okta assignment creation is disabled');
+      }
+
+      const createResult = await oktaClient.assignUserToApplicationWithMeta(oktaAppId, payload);
+      audit(logger, 'okta-assignment-created', {
+        correlationId: correlationIdValue,
+        oktaRequestId: createResult.meta.requestId,
+        oktaAppId,
+        oktaUserId
+      });
 
       return {
         status: 'success',
-        operation,
+        operation: 'okta_assignment_created',
         correlationId: correlationIdValue,
         secretsExposed: false
       };

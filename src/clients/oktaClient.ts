@@ -9,90 +9,48 @@ type OktaClientConfig = {
   maxRetries?: number;
 };
 
-function isRetryableStatus(status: number) {
-  return status === 429 || status >= 500;
+type OktaResponse<T> = {
+  body: T;
+  meta: { status: number; url: string; requestId?: string };
+};
+
+function oktaBaseUrl(domain: string) {
+  return `https://${domain}/`;
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function requestJson(url: string, options: RequestInit & { timeoutMs: number; maxRetries: number }) {
-  let attempt = 0;
-  let lastError: unknown;
-
-  while (attempt <= options.maxRetries) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), options.timeoutMs);
-
-    try {
-      const response = await fetch(url, { ...options, signal: controller.signal });
-      clearTimeout(timeout);
-
-      if (response.ok) {
-        if (response.status === 204) {
-          return undefined;
-        }
-        return await response.json();
-      }
-
-      if (isRetryableStatus(response.status) && attempt < options.maxRetries) {
-        const retryAfter = Number(response.headers.get('retry-after') ?? '0');
-        const delayMs = retryAfter > 0 ? retryAfter * 1000 : 250 * 2 ** attempt;
-        await sleep(delayMs);
-        attempt += 1;
-        continue;
-      }
-
-      const text = await response.text();
-      throw new Error(`Okta request failed (${response.status}): ${text || response.statusText}`);
-    } catch (error) {
-      clearTimeout(timeout);
-      lastError = error;
-      if (attempt < options.maxRetries && error instanceof DOMException && error.name === 'AbortError') {
-        await sleep(250 * 2 ** attempt);
-        attempt += 1;
-        continue;
-      }
-      throw error;
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error('Okta request failed');
+function authHeaders(config: OktaClientConfig) {
+  return config.oktaAuthMode === 'OAUTH2'
+    ? { Authorization: `Bearer ${config.oktaOauthAccessToken ?? ''}` }
+    : { Authorization: `SSWS ${config.oktaApiToken ?? ''}` };
 }
 
 export function createOktaClient(config: OktaClientConfig) {
-  const authHeader = config.oktaAuthMode === 'OAUTH2'
-    ? { Authorization: `Bearer ${config.oktaOauthAccessToken ?? ''}` }
-    : { Authorization: `SSWS ${config.oktaApiToken ?? ''}` };
-
   const http = createHttpClient({
-    baseUrl: `https://${config.oktaDomain}/`,
+    baseUrl: oktaBaseUrl(config.oktaDomain),
     timeoutMs: config.httpTimeoutMs ?? 30000,
     maxRetries: config.maxRetries ?? 3,
-    headers: authHeader
+    headers: authHeaders(config)
   });
 
-  const request = (path: string, init?: RequestInit) => requestJson(new URL(path, `https://${config.oktaDomain}/`).toString(), {
-    timeoutMs: config.httpTimeoutMs ?? 30000,
-    maxRetries: config.maxRetries ?? 3,
-    ...init,
-    headers: {
-      ...authHeader,
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {})
-    }
-  });
+  const get = async <T>(path: string) => http.request<T>(path);
+  const post = async <T>(path: string, body: unknown) => http.request<T>(path, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+  const put = async <T>(path: string, body: unknown) => http.request<T>(path, { method: 'PUT', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
 
   return {
-    getUser: (userIdOrLogin: string) => http.get(`api/v1/users/${encodeURIComponent(userIdOrLogin)}`),
-    listUsers: (query?: string) => http.get(`api/v1/users${query ? `?q=${encodeURIComponent(query)}` : ''}`),
-    listApplications: (query?: string) => http.get(`api/v1/apps${query ? `?q=${encodeURIComponent(query)}` : ''}`),
-    getApplication: (appId: string) => http.get(`api/v1/apps/${encodeURIComponent(appId)}`),
-    listApplicationUsers: (appId: string, query?: string) => http.get(`api/v1/apps/${encodeURIComponent(appId)}/users${query ? `?q=${encodeURIComponent(query)}` : ''}`),
-    getApplicationUser: (appId: string, userId: string) => http.get(`api/v1/apps/${encodeURIComponent(appId)}/users/${encodeURIComponent(userId)}`),
-    assignUserToApplication: (appId: string, payload: unknown) => request(`api/v1/apps/${encodeURIComponent(appId)}/users`, { method: 'POST', body: JSON.stringify(payload) }),
-    updateApplicationUser: (appId: string, userId: string, payload: unknown) => request(`api/v1/apps/${encodeURIComponent(appId)}/users/${encodeURIComponent(userId)}`, { method: 'PUT', body: JSON.stringify(payload) }),
-    request
+    getUser: async (userIdOrLogin: string) => (await get<any>(`api/v1/users/${encodeURIComponent(userIdOrLogin)}`)).body,
+    getUserWithMeta: (userIdOrLogin: string) => get<any>(`api/v1/users/${encodeURIComponent(userIdOrLogin)}`),
+    listUsers: async (query?: string) => (await get<any[]>(`api/v1/users${query ? `?q=${encodeURIComponent(query)}` : ''}`)).body,
+    listUsersWithMeta: (query?: string) => get<any[]>(`api/v1/users${query ? `?q=${encodeURIComponent(query)}` : ''}`),
+    listApplications: async (query?: string) => (await get<any[]>(`api/v1/apps${query ? `?q=${encodeURIComponent(query)}` : ''}`)).body,
+    listApplicationsWithMeta: (query?: string) => get<any[]>(`api/v1/apps${query ? `?q=${encodeURIComponent(query)}` : ''}`),
+    getApplication: async (appId: string) => (await get<any>(`api/v1/apps/${encodeURIComponent(appId)}`)).body,
+    getApplicationWithMeta: (appId: string) => get<any>(`api/v1/apps/${encodeURIComponent(appId)}`),
+    listApplicationUsers: async (appId: string, query?: string) => (await get<any[]>(`api/v1/apps/${encodeURIComponent(appId)}/users${query ? `?q=${encodeURIComponent(query)}` : ''}`)).body,
+    getApplicationUser: async (appId: string, userId: string) => (await get<any>(`api/v1/apps/${encodeURIComponent(appId)}/users/${encodeURIComponent(userId)}`)).body,
+    getApplicationUserWithMeta: (appId: string, userId: string) => get<any>(`api/v1/apps/${encodeURIComponent(appId)}/users/${encodeURIComponent(userId)}`),
+    assignUserToApplication: async (appId: string, payload: unknown) => (await post<any>(`api/v1/apps/${encodeURIComponent(appId)}/users`, payload)).body,
+    assignUserToApplicationWithMeta: (appId: string, payload: unknown) => post<any>(`api/v1/apps/${encodeURIComponent(appId)}/users`, payload),
+    updateApplicationUser: async (appId: string, userId: string, payload: unknown) => (await put<any>(`api/v1/apps/${encodeURIComponent(appId)}/users/${encodeURIComponent(userId)}`, payload)).body,
+    updateApplicationUserWithMeta: (appId: string, userId: string, payload: unknown) => put<any>(`api/v1/apps/${encodeURIComponent(appId)}/users/${encodeURIComponent(userId)}`, payload)
   };
 }
