@@ -3,7 +3,10 @@ const SECRET_KEYS = /password|token|authorization|api[-_]?key|credential|secret|
 
 export function redactValue(value: unknown): unknown {
   if (typeof value === 'string') {
-    return value.replace(/([A-Za-z0-9._-]{8,})/g, REDACTED);
+    return value
+      .replace(/([A-Za-z0-9._-]{12,})/g, REDACTED)
+      .replace(/(Bearer|SSWS)\s+[A-Za-z0-9._-]+/gi, '$1 ' + REDACTED)
+      .replace(/([A-Za-z0-9._-]+\.[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+)/g, REDACTED);
   }
 
   if (Array.isArray(value)) {

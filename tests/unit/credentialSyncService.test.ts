@@ -4,6 +4,6 @@ import { createCredentialSyncService } from '../../src/domain/credentialSyncServ
 describe('credential sync service', () => {
   it('returns dry-run result without secret exposure', async () => {
     const service = createCredentialSyncService({ cerbyWorkspace: 'workspace', cerbyApiToken: 'token', oktaDomain: 'okta.example', oktaAuthMode: 'SSWS', oktaApiToken: 'okta-token' }, { info: () => undefined, warn: () => undefined, error: () => undefined });
-    await expect(service.run({ argv: [], dryRun: true })).resolves.toMatchObject({ status: 'dry-run', secretsExposed: false });
+    await expect(service.run({ argv: ['--cerby-user', 'user@example.com', '--cerby-account', 'account-1', '--okta-user', 'user@example.com', '--okta-app', 'app-1', '--dry-run'], dryRun: true })).resolves.toMatchObject({ status: 'success', secretsExposed: false, dryRun: true });
   });
 });
