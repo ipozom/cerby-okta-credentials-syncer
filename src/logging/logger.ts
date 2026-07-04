@@ -1,15 +1,23 @@
 import { redactValue } from './redaction.js';
 
-export function createLogger(_config: { logLevel: string; redactedLogging: boolean }) {
+export function createLogger(_config: { logLevel: string; redactedLogging: boolean; debugMode?: boolean }) {
+  function write(level: 'info' | 'warn' | 'error', message: string, details?: unknown) {
+    console[level](JSON.stringify({ level, message, ...(details ? { details: redactValue(details) } : {}) }));
+  }
+
   return {
     info(message: string, details?: unknown) {
-      console.info(JSON.stringify({ level: 'info', message, ...(details ? { details: redactValue(details) } : {}) }));
+      write('info', message, details);
     },
     warn(message: string, details?: unknown) {
-      console.warn(JSON.stringify({ level: 'warn', message, ...(details ? { details: redactValue(details) } : {}) }));
+      write('warn', message, details);
     },
     error(message: string, details?: unknown) {
-      console.error(JSON.stringify({ level: 'error', message, ...(details ? { details: redactValue(details) } : {}) }));
+      write('error', message, details);
+    },
+    debug(message: string, details?: unknown) {
+      if (!_config.debugMode) return;
+      write('info', `debug:${message}`, details);
     }
   };
 }

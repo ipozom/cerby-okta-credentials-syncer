@@ -5,8 +5,10 @@ import { AuthorizationError, ConfigValidationError } from '../errors/domainError
 import { ApiError } from '../errors/apiErrors.js';
 
 type SyncConfig = {
+  environment?: 'preview' | 'production';
   cerbyWorkspace?: string;
   cerbyApiBaseUrl?: string;
+  cerbyApiBaseUrlPreview?: string;
   cerbyApiToken?: string;
   cerbyHeaders?: {
     source?: string;
@@ -17,16 +19,20 @@ type SyncConfig = {
     sentryTrace?: string;
   };
   oktaDomain?: string;
+  oktaDomainPreview?: string;
   oktaAuthMode?: string;
   oktaApiToken?: string;
   oktaOauthAccessToken?: string;
   httpTimeoutMs?: number;
   maxRetries?: number;
   dryRun?: boolean;
+  safeExecution?: boolean;
+  debugMode?: boolean;
   allowCreateOktaAssignment?: boolean;
   allowUpdateOktaAssignment?: boolean;
   redactedLogging?: boolean;
   correlationIdHeader?: string;
+  allowProductionExecution?: boolean;
   secretManager?: { get(name: string): string | undefined };
 };
 
@@ -108,9 +114,10 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
     throw new ConfigValidationError('Missing required sync configuration');
   }
 
+  const usePreview = config.environment === 'preview';
   const cerbyClient = createCerbyClient({
     cerbyWorkspace: config.cerbyWorkspace ?? '',
-    cerbyApiBaseUrl: config.cerbyApiBaseUrl,
+    cerbyApiBaseUrl: usePreview ? config.cerbyApiBaseUrlPreview || config.cerbyApiBaseUrl : config.cerbyApiBaseUrl,
     cerbyApiToken,
     cerbyHeaders: config.cerbyHeaders,
     httpTimeoutMs: config.httpTimeoutMs,
@@ -118,7 +125,7 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
   });
 
   const oktaClient = createOktaClient({
-    oktaDomain: config.oktaDomain,
+    oktaDomain: usePreview ? config.oktaDomainPreview || config.oktaDomain || '' : config.oktaDomain || '',
     oktaAuthMode: config.oktaAuthMode,
     oktaApiToken,
     oktaOauthAccessToken,
@@ -127,9 +134,19 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
   });
 
   return {
-    async run(input: { argv: string[]; dryRun: boolean }): Promise<SyncResult> {
+    async run(input: { argv: string[]; dryRun: boolean; preview?: boolean; debug?: boolean }): Promise<SyncResult> {
       const parsed = parseArgs(input.argv);
       const correlationIdValue = correlationId();
+      const environment = input.preview ? 'preview' : (config.environment ?? 'preview');
+
+      if (environment === 'production' && !config.allowProductionExecution) {
+        throw new AuthorizationError('Production execution is blocked unless explicitly allowed');
+      }
+
+      if (config.safeExecution) {
+        audit(logger, 'safe-execution-enabled', { correlationId: correlationIdValue, environment });
+      }
+
       const cerbyUserLookup = stringValue(parsed['cerby-user']);
       const cerbyAccountLookup = stringValue(parsed['cerby-account']);
       const oktaUserLookup = stringValue(parsed['okta-user']);
@@ -141,6 +158,7 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
 
       audit(logger, 'sync-started', {
         correlationId: correlationIdValue,
+        environment,
         dryRun: input.dryRun,
         cerbyUserLookup,
         cerbyAccountLookup,
@@ -215,13 +233,16 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
       const existingAssignment = assignmentResponse?.body;
       audit(logger, 'okta-assignment-checked', {
         correlationId: correlationIdValue,
+        environment,
         oktaRequestId: assignmentResponse?.meta.requestId,
         oktaAppId,
         oktaUserId,
         assignmentExists: Boolean(existingAssignment)
       });
 
-      const passwordResponse = await cerbyClient.getAccountPassword(stringValue((cerbyAccount as Record<string, unknown>).id) || cerbyAccountLookup);
+      const passwordResponse = config.safeExecution
+        ? { value: 'DUMMY_PASSWORD' }
+        : await cerbyClient.getAccountPassword(stringValue((cerbyAccount as Record<string, unknown>).id) || cerbyAccountLookup);
       const password = normalizePassword(passwordResponse);
       if (!password) {
         throw new AuthorizationError('Cerby password retrieval failed');
@@ -247,6 +268,7 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
         const updateResult = await oktaClient.updateApplicationUserWithMeta(oktaAppId, oktaUserId, payload);
         audit(logger, 'okta-assignment-updated', {
           correlationId: correlationIdValue,
+          environment,
           oktaRequestId: updateResult.meta.requestId,
           oktaAppId,
           oktaUserId
@@ -266,6 +288,7 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
       const createResult = await oktaClient.assignUserToApplicationWithMeta(oktaAppId, payload);
       audit(logger, 'okta-assignment-created', {
         correlationId: correlationIdValue,
+        environment,
         oktaRequestId: createResult.meta.requestId,
         oktaAppId,
         oktaUserId

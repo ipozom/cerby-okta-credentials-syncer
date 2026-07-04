@@ -7,5 +7,11 @@ export async function runSyncCredentialsCommand(argv: string[], env: NodeJS.Proc
   const config = validateConfig(loadConfig(env));
   const logger = createLogger(config);
   const service = createCredentialSyncService(config, logger);
-  return service.run({ argv, dryRun: argv.includes('--dry-run') || config.dryRun });
+  const environment = config.environment === 'production' ? 'production' : 'preview';
+  return service.run({
+    argv,
+    dryRun: argv.includes('--dry-run') || config.dryRun,
+    preview: argv.includes('--preview') || environment === 'preview',
+    debug: argv.includes('--debug') || config.debugMode
+  });
 }

@@ -22,4 +22,20 @@ describe('sync contract', () => {
     });
     expect(JSON.stringify(logs)).not.toContain('token');
   });
+
+  it('blocks production execution by default', async () => {
+    const service = createCredentialSyncService(
+      {
+        environment: 'production',
+        cerbyWorkspace: 'workspace',
+        cerbyApiToken: 'token',
+        oktaDomain: 'okta.example',
+        oktaAuthMode: 'SSWS',
+        oktaApiToken: 'okta-token'
+      },
+      { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    );
+
+    await expect(service.run({ argv: ['--cerby-user', 'user@example.com', '--cerby-account', 'account-1', '--okta-user', 'user@example.com', '--okta-app', 'app-1'], dryRun: false })).rejects.toThrow(/Production execution is blocked/i);
+  });
 });
