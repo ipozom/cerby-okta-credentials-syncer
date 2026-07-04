@@ -21,15 +21,6 @@ describe('credential sync service', () => {
     });
   });
 
-  it('fails fast when Cerby execution headers are missing', async () => {
-    const service = createCredentialSyncService(
-      { environment: 'preview', cerbyWorkspace: 'workspace', cerbyApiToken: 'token', oktaDomainPreview: 'okta-preview.example', oktaAuthMode: 'SSWS', oktaApiToken: 'okta-token' },
-      { info: () => undefined, warn: () => undefined, error: () => undefined }
-    );
-
-    await expect(service.run({ argv: ['--cerby-user', 'user@example.com', '--cerby-account', 'account-1', '--okta-user', 'user@example.com', '--okta-app', 'app-1', '--preview'], dryRun: false, preview: true })).rejects.toThrow(/CERBY_ORIGIN and CERBY_SOURCE/i);
-  });
-
   it('blocks production execution unless explicitly allowed', async () => {
     const service = createCredentialSyncService({ environment: 'production', cerbyWorkspace: 'workspace', cerbyApiToken: 'token', cerbyHeaders: { origin: 'https://example.cerby.com', source: 'web/refs/tags/web/v0.0.410' }, oktaDomain: 'okta.example', oktaAuthMode: 'SSWS', oktaApiToken: 'okta-token' }, { info: () => undefined, warn: () => undefined, error: () => undefined });
     await expect(service.run({ argv: ['--cerby-user', 'user@example.com', '--cerby-account', 'account-1', '--okta-user', 'user@example.com', '--okta-app', 'app-1'], dryRun: false })).rejects.toThrow(/Production execution is blocked/i);

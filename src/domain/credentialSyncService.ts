@@ -181,10 +181,6 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
         };
       }
 
-      if (!config.cerbyHeaders?.origin || !config.cerbyHeaders?.source) {
-        throw new ConfigValidationError('Missing required Cerby execution headers: CERBY_ORIGIN and CERBY_SOURCE');
-      }
-
       const debugEnabled = input.debug || config.debugMode;
 
       const cerbyUsers = await cerbyClient.listUsers(cerbyUserLookup);

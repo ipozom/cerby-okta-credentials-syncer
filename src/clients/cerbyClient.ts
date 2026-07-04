@@ -71,45 +71,52 @@ async function requestJson(url: string, options: RequestInit & { timeoutMs: numb
 }
 
 export function createCerbyClient(config: CerbyClientConfig) {
-  const baseUrl = config.cerbyApiBaseUrl ?? `https://${config.cerbyWorkspace}.cerby.com/api/v1/`;
-  const http = createHttpClient({
-    baseUrl,
-    timeoutMs: config.httpTimeoutMs ?? 30000,
-    maxRetries: config.maxRetries ?? 3,
-    headers: {
-      'X-API-Key': config.cerbyApiToken,
-      ...(config.cerbyHeaders?.source ? { 'cerby-source': config.cerbyHeaders.source } : {}),
-      ...(config.cerbyHeaders?.origin ? { origin: config.cerbyHeaders.origin } : {}),
-      ...(config.cerbyHeaders?.accept ? { accept: config.cerbyHeaders.accept } : {}),
-      ...(config.cerbyHeaders?.acceptLanguage ? { 'accept-language': config.cerbyHeaders.acceptLanguage } : {}),
-      ...(config.cerbyHeaders?.baggage ? { baggage: config.cerbyHeaders.baggage } : {}),
-      ...(config.cerbyHeaders?.sentryTrace ? { 'sentry-trace': config.cerbyHeaders.sentryTrace } : {})
-    }
-  });
+  const workspaceBaseUrl = `https://${config.cerbyWorkspace}.cerby.com/api/v1/`;
+  const candidateBaseUrls = config.cerbyApiBaseUrl && config.cerbyApiBaseUrl !== workspaceBaseUrl
+    ? [config.cerbyApiBaseUrl, workspaceBaseUrl]
+    : [config.cerbyApiBaseUrl ?? workspaceBaseUrl];
 
-  const request = (path: string, init?: RequestInit) => requestJson(new URL(path, baseUrl).toString(), {
-    timeoutMs: config.httpTimeoutMs ?? 30000,
-    maxRetries: config.maxRetries ?? 3,
-    ...init,
-    headers: {
-      'X-API-Key': config.cerbyApiToken,
-      ...(config.cerbyHeaders?.source ? { 'cerby-source': config.cerbyHeaders.source } : {}),
-      ...(config.cerbyHeaders?.origin ? { origin: config.cerbyHeaders.origin } : {}),
-      ...(config.cerbyHeaders?.accept ? { accept: config.cerbyHeaders.accept } : {}),
-      ...(config.cerbyHeaders?.acceptLanguage ? { 'accept-language': config.cerbyHeaders.acceptLanguage } : {}),
-      ...(config.cerbyHeaders?.baggage ? { baggage: config.cerbyHeaders.baggage } : {}),
-      ...(config.cerbyHeaders?.sentryTrace ? { 'sentry-trace': config.cerbyHeaders.sentryTrace } : {}),
-      ...(init?.headers ?? {})
+  const request = async (path: string, init?: RequestInit) => {
+    let lastError: unknown;
+
+    for (const [index, baseUrl] of candidateBaseUrls.entries()) {
+      try {
+        return await requestJson(new URL(path, baseUrl).toString(), {
+          timeoutMs: config.httpTimeoutMs ?? 30000,
+          maxRetries: config.maxRetries ?? 3,
+          ...init,
+          headers: {
+            'X-API-Key': config.cerbyApiToken,
+            ...(config.cerbyHeaders?.source ? { 'cerby-source': config.cerbyHeaders.source } : {}),
+            ...(config.cerbyHeaders?.origin ? { origin: config.cerbyHeaders.origin } : {}),
+            ...(config.cerbyHeaders?.accept ? { accept: config.cerbyHeaders.accept } : {}),
+            ...(config.cerbyHeaders?.acceptLanguage ? { 'accept-language': config.cerbyHeaders.acceptLanguage } : {}),
+            ...(config.cerbyHeaders?.baggage ? { baggage: config.cerbyHeaders.baggage } : {}),
+            ...(config.cerbyHeaders?.sentryTrace ? { 'sentry-trace': config.cerbyHeaders.sentryTrace } : {}),
+            ...(init?.headers ?? {})
+          }
+        });
+      } catch (error) {
+        lastError = error;
+        const shouldFallback = index === 0 && baseUrl !== workspaceBaseUrl && error instanceof Error && /403/.test(error.message);
+        if (!shouldFallback) {
+          throw error;
+        }
+      }
     }
-  });
+
+    throw lastError instanceof Error ? lastError : new Error('Cerby request failed');
+  };
+
+  const get = async <T>(path: string) => (await request(path)).body as T;
 
   return {
-    listUsers: (query?: string) => http.get(`users${query ? `?q=${encodeURIComponent(query)}` : ''}`),
-    getUser: (userId: string) => http.get(`users/${encodeURIComponent(userId)}`),
-    listAccounts: (query?: string) => http.get(`accounts${query ? `?q=${encodeURIComponent(query)}` : ''}`),
-    getAccount: (accountId: string) => http.get(`accounts/${encodeURIComponent(accountId)}`),
-    listAccountsForUser: (userId: string) => http.get(`users/${encodeURIComponent(userId)}/accounts`),
-    getAccountPassword: (accountId: string) => http.get(`accounts/${encodeURIComponent(accountId)}/password`),
+    listUsers: (query?: string) => get(`users${query ? `?q=${encodeURIComponent(query)}` : ''}`),
+    getUser: (userId: string) => get(`users/${encodeURIComponent(userId)}`),
+    listAccounts: (query?: string) => get(`accounts${query ? `?q=${encodeURIComponent(query)}` : ''}`),
+    getAccount: (accountId: string) => get(`accounts/${encodeURIComponent(accountId)}`),
+    listAccountsForUser: (userId: string) => get(`users/${encodeURIComponent(userId)}/accounts`),
+    getAccountPassword: (accountId: string) => get(`accounts/${encodeURIComponent(accountId)}/password`),
     request
   };
 }
