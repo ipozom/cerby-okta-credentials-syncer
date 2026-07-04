@@ -28,6 +28,7 @@ Required variables:
 Optional variables:
 
 - `CERBY_API_BASE_URL`
+- `CERBY_ORIGIN` and `CERBY_SOURCE` for live Cerby requests
 - `CERBY_ORIGIN`
 - `CERBY_SOURCE`
 - `CERBY_ACCEPT`
@@ -41,6 +42,7 @@ Optional variables:
 ## Troubleshooting
 
 - If Cerby or Okta returns `401` or `403`, verify the token and tenant configuration.
+- If Cerby returns `403` before any lookup completes, confirm `CERBY_ORIGIN` and `CERBY_SOURCE` are set for the environment you are calling.
 - If an account or user cannot be found, confirm the lookup identifier and avoid ambiguous labels.
 - If assignment creation fails, verify that the target Okta app supports the requested credential shape.
 - If rate limits occur, retry after the reported delay and reduce request frequency.
