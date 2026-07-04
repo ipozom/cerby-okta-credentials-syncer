@@ -1,0 +1,1 @@
+export type SyncResult = { status: string; secretsExposed: boolean };
