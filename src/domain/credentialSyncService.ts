@@ -40,12 +40,14 @@ type AuditLogger = {
   info(message: string, details?: unknown): void;
   warn(message: string, details?: unknown): void;
   error(message: string, details?: unknown): void;
+  debug?(message: string, details?: unknown): void;
 };
 
 type SyncResult = {
   status: string;
   operation: string;
   correlationId: string;
+  environment: 'preview' | 'production';
   secretsExposed: false;
   dryRun?: boolean;
 };
@@ -110,34 +112,35 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
   const oktaApiToken = readSecret(config, 'oktaApiToken');
   const oktaOauthAccessToken = readSecret(config, 'oktaOauthAccessToken');
 
-  if (!cerbyApiToken || !config.oktaDomain || !config.oktaAuthMode) {
-    throw new ConfigValidationError('Missing required sync configuration');
-  }
-
-  const usePreview = config.environment === 'preview';
-  const cerbyClient = createCerbyClient({
-    cerbyWorkspace: config.cerbyWorkspace ?? '',
-    cerbyApiBaseUrl: usePreview ? config.cerbyApiBaseUrlPreview || config.cerbyApiBaseUrl : config.cerbyApiBaseUrl,
-    cerbyApiToken,
-    cerbyHeaders: config.cerbyHeaders,
-    httpTimeoutMs: config.httpTimeoutMs,
-    maxRetries: config.maxRetries
-  });
-
-  const oktaClient = createOktaClient({
-    oktaDomain: usePreview ? config.oktaDomainPreview || config.oktaDomain || '' : config.oktaDomain || '',
-    oktaAuthMode: config.oktaAuthMode,
-    oktaApiToken,
-    oktaOauthAccessToken,
-    httpTimeoutMs: config.httpTimeoutMs,
-    maxRetries: config.maxRetries
-  });
-
   return {
     async run(input: { argv: string[]; dryRun: boolean; preview?: boolean; debug?: boolean }): Promise<SyncResult> {
       const parsed = parseArgs(input.argv);
       const correlationIdValue = correlationId();
       const environment = input.preview ? 'preview' : (config.environment ?? 'preview');
+      const cerbyApiBaseUrl = environment === 'preview' ? config.cerbyApiBaseUrlPreview || config.cerbyApiBaseUrl : config.cerbyApiBaseUrl;
+      const oktaDomain = environment === 'preview' ? config.oktaDomainPreview || config.oktaDomain : config.oktaDomain;
+
+      if (!cerbyApiToken || !oktaDomain || !config.oktaAuthMode) {
+        throw new ConfigValidationError('Missing required sync configuration');
+      }
+
+      const cerbyClient = createCerbyClient({
+        cerbyWorkspace: config.cerbyWorkspace ?? '',
+        cerbyApiBaseUrl,
+        cerbyApiToken,
+        cerbyHeaders: config.cerbyHeaders,
+        httpTimeoutMs: config.httpTimeoutMs,
+        maxRetries: config.maxRetries
+      });
+
+      const oktaClient = createOktaClient({
+        oktaDomain: oktaDomain ?? '',
+        oktaAuthMode: config.oktaAuthMode,
+        oktaApiToken,
+        oktaOauthAccessToken,
+        httpTimeoutMs: config.httpTimeoutMs,
+        maxRetries: config.maxRetries
+      });
 
       if (environment === 'production' && !config.allowProductionExecution) {
         throw new AuthorizationError('Production execution is blocked unless explicitly allowed');
@@ -172,10 +175,13 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
           status: 'success',
           operation: 'dry_run_planned_sync',
           correlationId: correlationIdValue,
+          environment,
           secretsExposed: false,
           dryRun: true
         };
       }
+
+      const debugEnabled = input.debug || config.debugMode;
 
       const cerbyUsers = await cerbyClient.listUsers(cerbyUserLookup);
       const cerbyUserList = Array.isArray(cerbyUsers) ? cerbyUsers : [cerbyUsers];
@@ -240,6 +246,16 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
         assignmentExists: Boolean(existingAssignment)
       });
 
+      if (debugEnabled) {
+        logger.debug?.('request-metadata', {
+          correlationId: correlationIdValue,
+          environment,
+          endpoint: `GET /api/v1/apps/${oktaAppId}/users/${oktaUserId}`,
+          statusCode: assignmentResponse?.meta.status ?? 404,
+          oktaRequestId: assignmentResponse?.meta.requestId
+        });
+      }
+
       const passwordResponse = config.safeExecution
         ? { value: 'DUMMY_PASSWORD' }
         : await cerbyClient.getAccountPassword(stringValue((cerbyAccount as Record<string, unknown>).id) || cerbyAccountLookup);
@@ -277,6 +293,7 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
           status: 'success',
           operation: 'okta_assignment_updated',
           correlationId: correlationIdValue,
+          environment,
           secretsExposed: false
         };
       }
@@ -298,6 +315,7 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
         status: 'success',
         operation: 'okta_assignment_created',
         correlationId: correlationIdValue,
+        environment,
         secretsExposed: false
       };
     }
