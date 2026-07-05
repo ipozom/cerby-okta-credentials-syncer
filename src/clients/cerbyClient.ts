@@ -70,6 +70,40 @@ async function requestJson(url: string, options: RequestInit & { timeoutMs: numb
   throw lastError instanceof Error ? lastError : new Error('Cerby request failed');
 }
 
+function flattenCerbyResource(resource: unknown): unknown {
+  if (!resource || typeof resource !== 'object') {
+    return resource;
+  }
+
+  const record = resource as Record<string, unknown>;
+  const attributes = record.attributes;
+  if (attributes && typeof attributes === 'object') {
+    return {
+      ...record,
+      ...(attributes as Record<string, unknown>)
+    };
+  }
+
+  return record;
+}
+
+function normalizeCerbyResponse(body: unknown): unknown {
+  if (!body || typeof body !== 'object') {
+    return body;
+  }
+
+  const record = body as Record<string, unknown>;
+  if (Array.isArray(record.data)) {
+    return record.data.map((item) => flattenCerbyResource(item));
+  }
+
+  if (record.data && typeof record.data === 'object') {
+    return flattenCerbyResource(record.data);
+  }
+
+  return flattenCerbyResource(record);
+}
+
 export function createCerbyClient(config: CerbyClientConfig) {
   const workspaceBaseUrl = `https://${config.cerbyWorkspace}.cerby.com/api/v1/`;
   const candidateBaseUrls = config.cerbyApiBaseUrl && config.cerbyApiBaseUrl !== workspaceBaseUrl
@@ -81,7 +115,7 @@ export function createCerbyClient(config: CerbyClientConfig) {
 
     for (const [index, baseUrl] of candidateBaseUrls.entries()) {
       try {
-        return await requestJson(new URL(path, baseUrl).toString(), {
+        const response = await requestJson(new URL(path, baseUrl).toString(), {
           timeoutMs: config.httpTimeoutMs ?? 30000,
           maxRetries: config.maxRetries ?? 3,
           ...init,
@@ -96,6 +130,8 @@ export function createCerbyClient(config: CerbyClientConfig) {
             ...(init?.headers ?? {})
           }
         });
+
+        return normalizeCerbyResponse(response);
       } catch (error) {
         lastError = error;
         const shouldFallback = index === 0 && baseUrl !== workspaceBaseUrl && error instanceof Error && /403/.test(error.message);
@@ -108,7 +144,7 @@ export function createCerbyClient(config: CerbyClientConfig) {
     throw lastError instanceof Error ? lastError : new Error('Cerby request failed');
   };
 
-  const get = async <T>(path: string) => (await request(path)).body as T;
+  const get = async <T>(path: string) => (await request(path)) as T;
 
   return {
     listUsers: (query?: string) => get(`users${query ? `?q=${encodeURIComponent(query)}` : ''}`),

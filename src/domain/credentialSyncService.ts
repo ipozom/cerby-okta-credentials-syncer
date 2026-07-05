@@ -1,6 +1,7 @@
 import { createCerbyClient } from '../clients/cerbyClient.js';
 import { createOktaClient } from '../clients/oktaClient.js';
 import { assertCerbyUserAuthorizedToAccount } from './authorizationValidator.js';
+import { resolveUniqueMatch } from './mappingResolver.js';
 import { AuthorizationError, ConfigValidationError } from '../errors/domainErrors.js';
 import { ApiError } from '../errors/apiErrors.js';
 
@@ -185,11 +186,10 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
 
       const cerbyUsers = await cerbyClient.listUsers(cerbyUserLookup);
       const cerbyUserList = Array.isArray(cerbyUsers) ? cerbyUsers : [cerbyUsers];
-      const cerbyUserCandidates = cerbyUserList.filter((entry) => entry && typeof entry === 'object' && (entry.id === cerbyUserLookup || entry.email === cerbyUserLookup));
-      if (cerbyUserCandidates.length !== 1) {
+      const cerbyUser = resolveUniqueMatch(cerbyUserList as Array<{ id?: string; label?: string; email?: string; login?: string; username?: string }>, cerbyUserLookup);
+      if (!cerbyUser) {
         throw new AuthorizationError(`Cerby user lookup was ambiguous or not found: ${cerbyUserLookup}`);
       }
-      const cerbyUser = cerbyUserCandidates[0] as Record<string, unknown>;
 
       const cerbyAccount = await cerbyClient.getAccount(cerbyAccountLookup);
       if (!cerbyAccount || typeof cerbyAccount !== 'object') {
