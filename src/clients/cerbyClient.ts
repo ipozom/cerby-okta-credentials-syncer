@@ -39,10 +39,15 @@ async function requestJson(url: string, options: RequestInit & { timeoutMs: numb
       clearTimeout(timeout);
 
       if (response.ok) {
-        if (response.status === 204) {
-          return undefined;
-        }
-        return await response.json();
+        const body = response.status === 204 ? undefined : await response.json();
+        return {
+          body,
+          meta: {
+            status: response.status,
+            url: response.url,
+            requestId: response.headers.get('x-request-id') ?? response.headers.get('x-okta-request-id') ?? undefined
+          }
+        };
       }
 
       if (isRetryableStatus(response.status) && attempt < options.maxRetries) {
@@ -104,6 +109,13 @@ function normalizeCerbyResponse(body: unknown): unknown {
   return flattenCerbyResource(record);
 }
 
+function normalizeCerbyHttpResponse<T>(response: { body: unknown; meta: { status: number; url: string; requestId?: string } }) {
+  return {
+    body: normalizeCerbyResponse(response.body) as T,
+    meta: response.meta
+  };
+}
+
 export function createCerbyClient(config: CerbyClientConfig) {
   const workspaceBaseUrl = `https://${config.cerbyWorkspace}.cerby.com/api/v1/`;
   const candidateBaseUrls = config.cerbyApiBaseUrl && config.cerbyApiBaseUrl !== workspaceBaseUrl
@@ -131,7 +143,7 @@ export function createCerbyClient(config: CerbyClientConfig) {
           }
         });
 
-        return normalizeCerbyResponse(response);
+        return normalizeCerbyHttpResponse(response);
       } catch (error) {
         lastError = error;
         const shouldFallback = index === 0 && baseUrl !== workspaceBaseUrl && error instanceof Error && /403/.test(error.message);
@@ -144,15 +156,18 @@ export function createCerbyClient(config: CerbyClientConfig) {
     throw lastError instanceof Error ? lastError : new Error('Cerby request failed');
   };
 
-  const get = async <T>(path: string) => (await request(path)) as T;
+  const get = async <T>(path: string) => (await request(path)).body as T;
+  const getWithMeta = async <T>(path: string) => request(path) as Promise<{ body: T; meta: { status: number; url: string; requestId?: string } }>;
 
   return {
     listUsers: (query?: string) => get(`users${query ? `?q=${encodeURIComponent(query)}` : ''}`),
     getUser: (userId: string) => get(`users/${encodeURIComponent(userId)}`),
     listAccounts: (query?: string) => get(`accounts${query ? `?q=${encodeURIComponent(query)}` : ''}`),
     getAccount: (accountId: string) => get(`accounts/${encodeURIComponent(accountId)}`),
+    getAccountWithMeta: (accountId: string) => getWithMeta(`accounts/${encodeURIComponent(accountId)}`),
     listAccountsForUser: (userId: string) => get(`users/${encodeURIComponent(userId)}/accounts`),
-    getAccountPassword: (accountId: string) => get(`accounts/${encodeURIComponent(accountId)}/password`),
+    getAccountPassword: (accountId: string) => get(`accounts/${encodeURIComponent(accountId)}/secrets?filter[secretType]=password`),
+    getAccountPasswordWithMeta: (accountId: string) => getWithMeta(`accounts/${encodeURIComponent(accountId)}/secrets?filter[secretType]=password`),
     request
   };
 }

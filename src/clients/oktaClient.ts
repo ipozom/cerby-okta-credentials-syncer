@@ -34,7 +34,7 @@ export function createOktaClient(config: OktaClientConfig) {
 
   const get = async <T>(path: string) => http.request<T>(path);
   const post = async <T>(path: string, body: unknown) => http.request<T>(path, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
-  const put = async <T>(path: string, body: unknown) => http.request<T>(path, { method: 'PUT', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
+  const put = async <T>(path: string, body: unknown) => http.request<T>(path, { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } });
 
   return {
     getUser: async (userIdOrLogin: string) => (await get<any>(`api/v1/users/${encodeURIComponent(userIdOrLogin)}`)).body,
