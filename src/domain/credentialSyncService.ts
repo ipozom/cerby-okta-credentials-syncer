@@ -210,9 +210,10 @@ export function createCredentialSyncService(config: SyncConfig, logger: AuditLog
       }
 
       const passwordResponse = config.safeExecution
-        ? { body: { data: [{ attributes: { body: { type: 'plaintext', value: 'DUMMY_PASSWORD' } } }] }, meta: { status: 200, url: '' } }
+        ? { body: 'DUMMY_PASSWORD', meta: { status: 200, url: '' } }
         : await cerbyClient.getAccountPasswordWithMeta(stringValue(cerbyAccount.id) || cerbyAccountLookup);
-      const password = normalizePassword(passwordResponse.body);
+      const passwordSource = passwordResponse.body;
+      const password = normalizePassword(passwordSource);
       if (!password) {
         throw new AuthorizationError('Cerby password retrieval failed');
       }
